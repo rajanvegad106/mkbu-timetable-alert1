@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-OFFICIAL_HOME = "https://www.mkbhavuni.edu.in/mkbhavuniweb/"
+OFFICIAL_HOME = "https://mkbhavuni.edu.in/mkbhavuniweb/"
 STATE_FILE = Path("data/seen.json")
 
 HEADERS = {
