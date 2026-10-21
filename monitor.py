@@ -2,8 +2,8 @@
 import os
 import re
 import json
-import hashlib
 import time
+import hashlib
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -13,12 +13,14 @@ from bs4 import BeautifulSoup
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-OFFICIAL_HOME = "https://www.mkbhavuni.edu.in/mkbhavuniweb/"
-STATE_FILE = Path("data/seen.json")
+TIMETABLE_PAGE = (
+    "https://www.mkbhavuni.edu.in/mkbhavuniweb/timetable.php"
+)
 
-TIMEOUT = 10
-RETRIES = 2
+STATE_FILE = Path("data/seen.json")
+TIMEOUT = 8
 MAX_PDF_MB = 45
+MAX_LINKS_PER_RUN = 20
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; MKBUTimetableMonitor/1.0)"
@@ -28,70 +30,11 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 
-def fetch_page(url):
-    last_error = None
-
-    for attempt in range(RETRIES + 1):
-        try:
-            response = session.get(
-                url,
-                timeout=TIMEOUT,
-                allow_redirects=True,
-            )
-            response.raise_for_status()
-            return response
-        except requests.RequestException as exc:
-            last_error = exc
-            if attempt < RETRIES:
-                time.sleep(2)
-
-    raise RuntimeError(
-        f"Could not open {url} after retries: {last_error}"
-    )
-
-
-def telegram_message(text):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    response = session.post(
-        url,
-        data={
-            "chat_id": CHAT_ID,
-            "text": text,
-            "disable_web_page_preview": True,
-        },
-        timeout=TIMEOUT,
-    )
-    response.raise_for_status()
-
-    if not response.json().get("ok"):
-        raise RuntimeError("Telegram message was not accepted")
-
-
-def telegram_pdf(content, filename, caption):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
-    response = session.post(
-        url,
-        data={
-            "chat_id": CHAT_ID,
-            "caption": caption[:900],
-        },
-        files={
-            "document": (filename, content, "application/pdf")
-        },
-        timeout=TIMEOUT,
-    )
-    response.raise_for_status()
-
-    if not response.json().get("ok"):
-        raise RuntimeError("Telegram PDF was not accepted")
-
-
-def allowed_official_url(url):
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").lower()
-
+def official_url(url):
+    p = urlparse(url)
+    host = (p.hostname or "").lower()
     return (
-        parsed.scheme in ("http", "https")
+        p.scheme in ("http", "https")
         and (
             host == "mkbhavuni.edu.in"
             or host.endswith(".mkbhavuni.edu.in")
@@ -99,90 +42,39 @@ def allowed_official_url(url):
     )
 
 
-def looks_like_timetable(text, url):
-    combined = f"{text} {url}".lower()
-    combined = combined.replace("_", " ").replace("%20", " ")
-
-    return bool(re.search(
-        r"time[\s-]*table|timetable|exam[\s-]*"
-        r"(schedule|programme|program|date)|"
-        r"examination[\s-]*(schedule|programme|program)|"
-        r"b\.?\s?sc|bachelor of science",
-        combined,
-    ))
-
-
-def collect_timetable_links():
-    response = fetch_page(OFFICIAL_HOME)
-    found = {}
-    pages_to_scan = [(response.url, response.text)]
-
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    for a in soup.find_all("a", href=True):
-        title = a.get_text(" ", strip=True)
-        url = urljoin(response.url, a["href"]).split("#")[0]
-
-        if not allowed_official_url(url):
-            continue
-
-        if not looks_like_timetable(title, url):
-            continue
-
-        found[url] = title or url
-
-        if (
-            not url.lower().split("?")[0].endswith(".pdf")
-            and len(pages_to_scan) < 12
-        ):
-            try:
-                page = fetch_page(url)
-                content_type = page.headers.get(
-                    "Content-Type", ""
-                ).lower()
-
-                if (
-                    "html" in content_type
-                    or "<html" in page.text[:500].lower()
-                ):
-                    pages_to_scan.append((page.url, page.text))
-            except Exception as exc:
-                print(f"Could not scan page {url}: {exc}")
-
-    for page_url, html in pages_to_scan[1:]:
-        page_soup = BeautifulSoup(html, "html.parser")
-
-        for a in page_soup.find_all("a", href=True):
-            title = a.get_text(" ", strip=True)
-            url = urljoin(page_url, a["href"]).split("#")[0]
-
-            if (
-                allowed_official_url(url)
-                and looks_like_timetable(title, url)
-            ):
-                found[url] = title or url
-
-    return found
-
-
-def fetch_resource(url):
-    response = fetch_page(url)
-    body = response.content
-    content_type = response.headers.get("Content-Type", "").lower()
-
-    is_pdf = (
-        response.url.lower().split("?")[0].endswith(".pdf")
-        or url.lower().split("?")[0].endswith(".pdf")
-        or "application/pdf" in content_type
-        or body[:5] == b"%PDF-"
+def telegram_message(message):
+    response = session.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        data={
+            "chat_id": CHAT_ID,
+            "text": message[:4000],
+            "disable_web_page_preview": True,
+        },
+        timeout=TIMEOUT,
     )
+    response.raise_for_status()
+    if not response.json().get("ok"):
+        raise RuntimeError("Telegram message failed")
 
-    digest = hashlib.sha256(body).hexdigest()
 
-    return response.url, body, is_pdf, digest
+def telegram_pdf(body, filename, caption):
+    response = session.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+        data={
+            "chat_id": CHAT_ID,
+            "caption": caption[:900],
+        },
+        files={
+            "document": (filename, body, "application/pdf")
+        },
+        timeout=25,
+    )
+    response.raise_for_status()
+    if not response.json().get("ok"):
+        raise RuntimeError("Telegram PDF delivery failed")
 
 
-def load_previous():
+def load_state():
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
@@ -190,87 +82,158 @@ def load_previous():
         return {}
 
 
-def main():
+def save_state(state):
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    previous = load_previous()
+    STATE_FILE.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
-    # If the main website is unavailable, preserve history.
+
+def get_timetable_links():
+    response = session.get(
+        TIMETABLE_PAGE,
+        timeout=TIMEOUT,
+        allow_redirects=True,
+    )
+    response.raise_for_status()
+
+    if not official_url(response.url):
+        raise RuntimeError("Timetable page redirected outside MKBU domain")
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    links = {}
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        url = urljoin(response.url, href).split("#")[0]
+        title = a.get_text(" ", strip=True) or url
+        combined = f"{title} {url}".lower()
+
+        if not official_url(url):
+            continue
+
+        is_pdf = (
+            urlparse(url).path.lower().endswith(".pdf")
+            or ".pdf?" in url.lower()
+        )
+
+        relevant = bool(re.search(
+            r"timetable|time[\s_-]*table|b\.?\s*sc|"
+            r"bachelor|semester|exam|examination|schedule|"
+            r"programme|program|practical",
+            combined,
+        ))
+
+        if is_pdf and relevant:
+            links[url] = title
+
+    # Avoid a false empty baseline during maintenance or page errors.
+    if not links:
+        raise RuntimeError(
+            "No relevant PDF links found on timetable page; "
+            "previous history preserved."
+        )
+
+    return dict(list(links.items())[:MAX_LINKS_PER_RUN])
+
+
+def download_pdf(url):
+    response = session.get(
+        url,
+        timeout=TIMEOUT,
+        allow_redirects=True,
+    )
+    response.raise_for_status()
+
+    if not official_url(response.url):
+        raise RuntimeError("PDF redirected outside MKBU domain")
+
+    body = response.content
+
+    if not body.startswith(b"%PDF-"):
+        raise RuntimeError("Link did not return a valid PDF")
+
+    if len(body) > MAX_PDF_MB * 1024 * 1024:
+        raise RuntimeError("PDF exceeds configured size limit")
+
+    return body, hashlib.sha256(body).hexdigest(), response.url
+
+
+def main():
+    previous = load_state()
+
+    # If the official page is unavailable, keep existing history.
     try:
-        links = collect_timetable_links()
+        links = get_timetable_links()
     except Exception as exc:
-        print(f"MKBU website unavailable or under maintenance: {exc}")
-        print("Previous data preserved. Will retry next scheduled run.")
+        print(f"Timetable page unavailable: {exc}")
+        print("Previous history preserved; next run will retry.")
         return
 
     current = {}
-    changed = []
+    alerts = []
 
     for url, title in links.items():
         try:
-            final_url, body, is_pdf, digest = fetch_resource(url)
+            body, digest, final_url = download_pdf(url)
 
             current[url] = {
                 "title": title,
                 "hash": digest,
                 "final_url": final_url,
-                "is_pdf": is_pdf,
             }
 
-            if url in previous:
-                if previous[url].get("hash") != digest:
-                    changed.append((title, final_url, body, is_pdf))
-            elif previous:
-                changed.append((title, final_url, body, is_pdf))
+            old = previous.get(url)
+
+            # First run creates a baseline without sending old PDFs.
+            if previous and (
+                old is None or old.get("hash") != digest
+            ):
+                alerts.append((title, final_url, body))
 
         except Exception as exc:
-            print(f"Could not check {url}: {exc}")
+            print(f"Skipped unavailable PDF: {url} ({exc})")
+            time.sleep(0.2)
 
-    # Do not overwrite good history if all resource checks failed.
-    if links and not current:
-        print("All resource checks failed. Previous data preserved.")
+    # Do not erase good history if every PDF failed.
+    if not current:
+        print("No PDFs could be verified; previous history preserved.")
         return
 
-    # On the first successful scan, establish a baseline.
-    if not previous:
-        STATE_FILE.write_text(
-            json.dumps(current, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+    # Keep old entries that could not be checked this run.
+    merged = dict(previous)
+    merged.update(current)
 
+    if not previous:
+        save_state(current)
         telegram_message(
             "MKBU timetable monitor connected.\n"
-            f"Official source: {OFFICIAL_HOME}\n"
-            f"Timetable-related links found: {len(current)}\n"
-            "Initial baseline saved. Future detected changes will trigger alerts."
+            f"Source: {TIMETABLE_PAGE}\n"
+            f"Valid PDFs checked: {len(current)}\n"
+            "Initial baseline saved. Future detected changes will alert."
         )
-
-        print(f"Baseline saved: {len(current)} links")
+        print(f"Initial baseline saved: {len(current)} PDFs")
         return
 
-    # Send detected updates before saving the new history.
-    for title, url, body, is_pdf in changed:
+    # Deliver alerts before updating stored hashes.
+    for title, url, body in alerts:
         caption = (
             f"MKBU timetable update\n{title}\n"
             f"Official source: {url}"
         )
+        filename = Path(urlparse(url).path).name or "MKBU_Timetable.pdf"
 
-        if is_pdf and len(body) <= MAX_PDF_MB * 1024 * 1024:
-            filename = Path(urlparse(url).path).name
-            if not filename.lower().endswith(".pdf"):
-                filename = "MKBU_Timetable.pdf"
-
+        try:
             telegram_pdf(body, filename, caption)
-        else:
+        except Exception as exc:
+            print(f"PDF delivery failed: {exc}")
             telegram_message(caption)
 
-    STATE_FILE.write_text(
-        json.dumps(current, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
+    save_state(merged)
     print(
-        f"Checked {len(current)} links; "
-        f"changes detected: {len(changed)}"
+        f"Valid PDFs checked: {len(current)}; "
+        f"updates detected: {len(alerts)}"
     )
 
 
