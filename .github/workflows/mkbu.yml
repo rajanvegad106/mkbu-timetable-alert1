@@ -1,4 +1,4 @@
-name: MKBU BSc Timetable Monitor
+name: MKBU BSc Timetable and Website Monitor
 
 on:
   schedule:
@@ -15,7 +15,7 @@ concurrency:
 jobs:
   check-timetable:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
 
     steps:
       - name: Get repository files
@@ -31,18 +31,24 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Check MKBU timetable
+      - name: Check MKBU timetable PDFs
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python monitor.py
 
+      - name: Check full MKBU website for uploads and changes
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python site_monitor.py
+
       - name: Save monitoring history
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/seen.json
+          git add data/seen.json data/site_seen.json
           if ! git diff --cached --quiet; then
-            git commit -m "Update timetable monitoring history"
+            git commit -m "Update MKBU monitoring history"
             git push
           fi
